@@ -2,10 +2,6 @@
 /* █▀█ █▀█ █▄▄ █▀█ ▀█▀    ▄▀█ █▀█ █▀▄▀█ */
 /* █▀▄ █▄█ █▄█ █▄█ ░█░    █▀█ █▀▄ █░▀░█ */
 
-// Pins used
-// GPIO34 (ADC Unit 1 Ch6) - Joystick Vrx (yellow)
-// GPIO35 (ADC Unit 1 Ch7) - Joystick Vry (white)
-
 #include <string.h>
 #include <stdio.h>
 #include "sdkconfig.h"
@@ -16,7 +12,23 @@
 #include "esp_adc/adc_continuous.h"
 #include "peripherals.h"
 
+typedef enum direction {
+  NEUTRAL,
+  INCREASE,
+  DECREASE,
+} direction;
+
+static uint8_t base_adjust, claw_adjust, vertical_adjust, forward_adjust;
+
+uint8_t * adjust_vars[SERVO_COUNT] = {
+  &base_adjust, 
+  &claw_adjust,
+  &vertical_adjust,
+  &forward_adjust,
+};
+
 TaskHandle_t adcTaskHandle = NULL;
+TaskHandle_t servoTaskHandle = NULL;
 
 /* @function s_conv_done_cb 
  * @brief Callback when adc is done converting */
@@ -54,18 +66,67 @@ void ADC_Task(void *arg)
         uint32_t chan_num = ADC_GET_CHANNEL(p);
         uint32_t data = ADC_GET_DATA(p);
 
-        if (chan_num == JOYSTICK_VRX_CHAN) {
-          if (data < JOYSTICK_NEUTRAL_THRESHOLD_MIN) printf("LEFT\n");
-          if (data > JOYSTICK_NEUTRAL_THRESHOLD_MAX) printf("RIGHT\n");
-        } else if (chan_num == JOYSTICK_VRY_CHAN) {
-          if (data < JOYSTICK_NEUTRAL_THRESHOLD_MIN) printf("UP\n");
-          if (data > JOYSTICK_NEUTRAL_THRESHOLD_MAX) printf("DOWN\n");
+        uint8_t * adjust_var = NULL;
+
+        if (chan_num == JOYSTICK_BASE_CHAN) {
+          adjust_var = &base_adjust;
+        } else if (chan_num == JOYSTICK_CLAW_CHAN) {
+          adjust_var = &claw_adjust;
+        } else if (chan_num == JOYSTICK_VERTICAL_CHAN) {
+          adjust_var = &vertical_adjust;
+        } else if (chan_num == JOYSTICK_FORWARD_CHAN) {
+          adjust_var = &forward_adjust;
+        }
+
+        if (adjust_var == NULL) continue;
+
+        uint8_t value;
+        if (data < JOYSTICK_NEUTRAL_THRESHOLD_MIN) {
+          // some of the servos are backwards/upside down :|
+          value = chan_num == JOYSTICK_BASE_CHAN || chan_num == JOYSTICK_VERTICAL_CHAN ? INCREASE : DECREASE;
+          *adjust_var = value;
+        } else if (data > JOYSTICK_NEUTRAL_THRESHOLD_MAX) {
+          value = chan_num == JOYSTICK_BASE_CHAN || chan_num == JOYSTICK_VERTICAL_CHAN ? DECREASE : INCREASE;
+          *adjust_var = value;
+        } else {
+          *adjust_var = NEUTRAL;
         }
       }
     }
   }
 }
 
+void Servo_Task(void *arg)
+{
+  Servo_Init();
+
+  //                                 Base   Claw   Vert  Forw
+  uint16_t duty_min[SERVO_COUNT] = {  350,   660,  280,   200 };
+  uint16_t duty_max[SERVO_COUNT] = { 1024,  1024,  720,   490 };
+  uint8_t steps[SERVO_COUNT]     = {    8,    10,    8,     4 };
+
+  // Initialize position
+  uint16_t duty[SERVO_COUNT];
+  for (int i = 0; i < SERVO_COUNT; i++) {
+    duty[i] = (duty_max[i] - duty_min[i]) / 2;
+    Servo_SetDutyCycle(i, duty[i]);
+  };
+
+  while(1) {
+    vTaskDelay(pdMS_TO_TICKS(25));
+    for (int i = 0; i < SERVO_COUNT; i++) {
+      if (*adjust_vars[i] == INCREASE) duty[i] += steps[i];
+      if (*adjust_vars[i] == DECREASE) duty[i] -= steps[i];
+
+      duty[i] = duty[i] < duty_min[i] ? duty_min[i] : duty[i];
+      duty[i] = duty[i] > duty_max[i] ? duty_max[i] : duty[i];
+
+      if (*adjust_vars[i] != NEUTRAL) Servo_SetDutyCycle(i, duty[i]);
+    }
+  }
+}
+
 void app_main(void) {
   xTaskCreate(ADC_Task, "ADC_Task", 4096, NULL, 10, &adcTaskHandle);
+  xTaskCreate(Servo_Task, "Servo_Task", 4096, NULL, 10, &servoTaskHandle);
 }
