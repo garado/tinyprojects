@@ -5,9 +5,7 @@
 
 #include <inttypes.h>
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
+#include <rom/ets_sys.h>
 #include "driver/adc.h"
 #include "driver/dac_continuous.h"
 #include "driver/gpio.h"
@@ -18,6 +16,7 @@
 #define HIGH 1
 #define TRIGGER_PIN GPIO_NUM_23
 #define GPIO_INPUT_PIN_SEL (1ULL << TRIGGER_PIN)
+#define AUDIO_SAMPLE_RATE  48000
 
 void app_main(void)
 {
@@ -34,7 +33,7 @@ void app_main(void)
     .chan_mask = DAC_CHANNEL_MASK_ALL,
     .desc_num = 4,
     .buf_size = 2048,
-    .freq_hz = CONFIG_EXAMPLE_AUDIO_SAMPLE_RATE,
+    .freq_hz = AUDIO_SAMPLE_RATE,
     .offset = 0,
     .clk_src = DAC_DIGI_CLK_SRC_APLL,  // Using APLL as clock source to get a wider frequency range
     .chan_mode = DAC_CHANNEL_MODE_SIMUL,
@@ -56,7 +55,7 @@ void app_main(void)
     }
 
     last_state = current_state;
-    vTaskDelay(pdMS_TO_TICKS(200));
+    ets_delay_us(1000);
   }
 }
 
