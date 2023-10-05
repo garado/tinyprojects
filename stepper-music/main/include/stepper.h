@@ -6,19 +6,23 @@
 // use 2-wire control
 // http://www.tigoe.com/pcomp/code/circuits/motors/stepper-motors/
 
+#include <stdint.h>
+
 #ifndef __STEPPER_H__
 #define __STEPPER_H__
 
-#include <stdint.h>
+#define ONE_HUNDRED_HZ 100
+#define TWENTY_KILOHERTZ 20000
+#define DEFAULT_STEP_RATE ONE_HUNDRED_HZ
 
 typedef struct Stepper {
-  int number_of_steps;
-  int direction;
-  int step_number;
-  unsigned long last_step_time;
-  unsigned long step_delay;
-
+  int32_t step_count;
+  uint32_t overflow_reps;
+  uint8_t stepper_state;
   uint8_t coil_state;
+  uint16_t steps_per_second_rate;
+
+  // Pins
   int coil_a_dir;
   int coil_a_dir_inv;
   int coil_b_dir;
@@ -37,6 +41,16 @@ Stepper * Stepper_Init(int pin1, int pin2, int pin3, int pin4);
  * @brief Set speed in revolutions per minute
  **/
 void Stepper_SetSpeed(Stepper * stepper, int speed);
+
+/* @Function: Stepper_SetRate
+ * @brief Sets the stepping rate in steps per second.
+ **/
+void Stepper_SetRate(Stepper * s, uint16_t rate);
+
+/* @Function: Stepper_InitSteps
+ * @brief Sets the steps and starts the stepper
+ **/
+void Stepper_InitSteps(Stepper * s, int32_t steps);
 
 /* @Function: Stepper_StepMotor
  * @brief Move motor forward or backwards
