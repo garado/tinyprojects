@@ -20,6 +20,15 @@
 #include "esp_system.h"
 #include "sdkconfig.h"
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <errno.h>
+
+static const char *TAG = "example";
+
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
 #define LEDC_FREQUENCY  (440) // Hz
@@ -97,54 +106,53 @@ void Stepper2_Task(void * arg)
 
 void app_main(void)
 {
-  static const char *TAG = "example";
-
-  // Mount path for the partition
+  // Mount filesystem
   const char *base_path = "/spiflash";
 
-  // To mount device we need name of device partition, define base_path
-  // and allow format partition in case if it is new one and was not formatted before
   const esp_vfs_fat_mount_config_t mount_config = {
     .max_files = 4,
     .format_if_mount_failed = false,
     .allocation_unit_size = CONFIG_WL_SECTOR_SIZE
   };
+
   esp_err_t err;
   err = esp_vfs_fat_spiflash_mount_ro(base_path, "storage", &mount_config);
-
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to mount FATFS (%s)", esp_err_to_name(err));
     return;
   }
 
   FILE* f;
-  char* pos;
-  char line[128];
-  char* filename = "/spiflash/hello.txt";
+  char* filename = "/spiflash/test.mid";
 
+  // Get file details
+  struct stat st;
+  if(stat(filename, &st) < 0){
+    ESP_LOGE(TAG, "Failed to read file stats");
+    return;
+  }
+
+  // Open file
   f = fopen(filename, "rb");
   if (f == NULL) {
     ESP_LOGE(TAG, "Failed to open file for reading");
     return;
   }
 
-  fgets(line, sizeof(line), f);
-  fclose(f);
-  // strip newline
-  pos = strchr(line, '\n');
-  if (pos) {
-    *pos = '\0';
+  // Read bytes from file
+  char c;
+  while (1) {
+    c = fgetc(f);
+    if (c == EOF) break;
+    printf("%x\n", c);
+    vTaskDelay(10);
   }
 
-  // Unmount
+  // Close and unmount
+  fclose(f);
   esp_vfs_fat_spiflash_unmount_ro(base_path, "storage");
 
   // xTaskCreate(Stepper0_Task, "Stepper0_Task", 4096, NULL, 10, &Stepper0_TaskHandle);
   // xTaskCreate(Stepper1_Task, "Stepper1_Task", 4096, NULL, 10, &Stepper1_TaskHandle);
   // xTaskCreate(Stepper2_Task, "Stepper2_Task", 4096, NULL, 10, &Stepper2_TaskHandle);
-
-  // while (1) {
-  //   // vTaskDelay(1000);
-  //   // ESP_LOGI(TAG, "Read from file: '%s'", line);
-  // }
 }
