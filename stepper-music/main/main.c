@@ -12,7 +12,13 @@
 #include "driver/ledc.h"
 #include "hal/ledc_types.h"
 #include "esp_log.h"
-#include "include/midi.h"
+
+#include "midi.h"
+
+#include "esp_vfs.h"
+#include "esp_vfs_fat.h"
+#include "esp_system.h"
+#include "sdkconfig.h"
 
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
@@ -22,15 +28,8 @@
 #define LOW  0
 #define HIGH 1  
 
-// Frequency
-#define A4      440
-#define CSHARP5 554 // 554.37 
-#define E5      659 // 659.25
-
-// #define A1        55
-// #define CSHARP1   32 // 32.70
-// #define E2        82 // 82.41
-
+// Frequencies
+// these note names are wrong
 #define A1        220
 #define CSHARP1   277
 #define E2        165
@@ -56,6 +55,7 @@ static void Stepper_Init(int pin, int chan, int timer)
   };
   ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
+  // LEDC channel configuration
   ledc_channel_config_t ledc_channel = {
     .speed_mode     = LEDC_MODE,
     .channel        = chan,
@@ -72,8 +72,8 @@ TaskHandle_t Stepper0_TaskHandle = NULL;
 void Stepper0_Task(void * arg)
 {
   Stepper_Init(STEPPER_0_PIN, LEDC_CHANNEL_0, LEDC_TIMER_0);
-  ledc_set_freq(LEDC_MODE, LEDC_TIMER_0, CSHARP1);
-  while (1) { vTaskDelay(1); }
+  ledc_set_freq(LEDC_MODE, LEDC_TIMER_0, A1);
+  while (1) { vTaskDelay(100); }
 }
 
 TaskHandle_t Stepper1_TaskHandle = NULL;
@@ -81,27 +81,70 @@ void Stepper1_Task(void * arg)
 {
   Stepper_Init(STEPPER_1_PIN, LEDC_CHANNEL_1, LEDC_TIMER_1);
   ledc_set_freq(LEDC_MODE, LEDC_TIMER_1, A1);
-  while (1) { vTaskDelay(1); }
+  while (1) { vTaskDelay(100); }
 }
 
 TaskHandle_t Stepper2_TaskHandle = NULL;
 void Stepper2_Task(void * arg)
 {
   Stepper_Init(STEPPER_2_PIN, LEDC_CHANNEL_2, LEDC_TIMER_2);
-  ledc_set_freq(LEDC_MODE, LEDC_TIMER_2, E2);
-  while (1) { vTaskDelay(1); }
+  ledc_set_freq(LEDC_MODE, LEDC_TIMER_2, A1);
+  while (1) {
+    vTaskDelay(100);
+    printf("task2. wat\n");
+  }
 }
 
 void app_main(void)
 {
-  // Configure trigger pin
-  gpio_config_t io_conf = {};
-  io_conf.pin_bit_mask = GPIO_OUT_PINS;
-  io_conf.mode = GPIO_MODE_INPUT;
-  io_conf.pull_up_en = 0;
-  gpio_config(&io_conf);
-  
-  xTaskCreate(Stepper0_Task, "Stepper0_Task", 4096, NULL, 10, &Stepper0_TaskHandle);
-  xTaskCreate(Stepper1_Task, "Stepper1_Task", 4096, NULL, 10, &Stepper1_TaskHandle);
-  xTaskCreate(Stepper2_Task, "Stepper2_Task", 4096, NULL, 10, &Stepper2_TaskHandle);
+  static const char *TAG = "example";
+
+  // Mount path for the partition
+  const char *base_path = "/spiflash";
+
+  // To mount device we need name of device partition, define base_path
+  // and allow format partition in case if it is new one and was not formatted before
+  const esp_vfs_fat_mount_config_t mount_config = {
+    .max_files = 4,
+    .format_if_mount_failed = false,
+    .allocation_unit_size = CONFIG_WL_SECTOR_SIZE
+  };
+  esp_err_t err;
+  err = esp_vfs_fat_spiflash_mount_ro(base_path, "storage", &mount_config);
+
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to mount FATFS (%s)", esp_err_to_name(err));
+    return;
+  }
+
+  FILE* f;
+  char* pos;
+  char line[128];
+  char* filename = "/spiflash/hello.txt";
+
+  f = fopen(filename, "rb");
+  if (f == NULL) {
+    ESP_LOGE(TAG, "Failed to open file for reading");
+    return;
+  }
+
+  fgets(line, sizeof(line), f);
+  fclose(f);
+  // strip newline
+  pos = strchr(line, '\n');
+  if (pos) {
+    *pos = '\0';
+  }
+
+  // Unmount
+  esp_vfs_fat_spiflash_unmount_ro(base_path, "storage");
+
+  // xTaskCreate(Stepper0_Task, "Stepper0_Task", 4096, NULL, 10, &Stepper0_TaskHandle);
+  // xTaskCreate(Stepper1_Task, "Stepper1_Task", 4096, NULL, 10, &Stepper1_TaskHandle);
+  // xTaskCreate(Stepper2_Task, "Stepper2_Task", 4096, NULL, 10, &Stepper2_TaskHandle);
+
+  // while (1) {
+  //   // vTaskDelay(1000);
+  //   // ESP_LOGI(TAG, "Read from file: '%s'", line);
+  // }
 }
