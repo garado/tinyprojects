@@ -1,0 +1,15 @@
+#!/bin/bash
+
+midifile=$1
+main="./main/main.c"
+
+# generate header
+stripped=${midifile%.mid}   # strip suffix
+stripped="${stripped##*/}"  # remove everything before last /
+xxd -n "${stripped}_mid" --include $midifile > "./main/include/midi/$stripped.h"
+
+sed -i "6s/.*/#include \"midi\/$stripped.h\"/" $main
+sed -i "7s/.*/#define MIDI_LEN (${stripped}_mid_len)/" $main
+sed -i "8s/.*/#define MIDI_ARR (${stripped}_mid)/" $main
+
+idf.py build flash monitor
