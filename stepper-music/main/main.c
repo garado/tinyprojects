@@ -7,8 +7,8 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "soc/gpio_reg.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -17,6 +17,9 @@
 #include "frequency.h"
 
 /***** Specify Midi file and length here ******/
+// #include "midi/god_multi.h"
+// #define MIDI_LEN (playing_god_multi_mid_len)
+// #define MIDI_ARR (playing_god_multi_mid)
 #include "midi/midi_god.h"
 #define MIDI_LEN (god_mid_len)
 #define MIDI_ARR (god_mid)
@@ -25,6 +28,8 @@
 #define LOW  0
 #define HIGH 1
 #define STEPPER_COUNT 4
+
+#define TEMPO_BYTE_LENGTH 3
 #define STEPPER_NO_NOTE_PLAYING 128 // valid midi note range is 0-127
 
 // Pin definitions
@@ -36,79 +41,90 @@
 #define GPIO_OUT_PINS ((1ULL << STEPPER_0_PIN) | (1ULL << STEPPER_1_PIN)| \
                        (1ULL << STEPPER_2_PIN) | (1ULL << STEPPER_3_PIN) | (1ULL << DEBUG_LED))
 
-static const char * TAG = "Step";
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_DUTY_RES   LEDC_TIMER_3_BIT // only 50% duty available
 
 // Stepper array variables
 TaskHandle_t StepperTaskHandle;
-esp_timer_handle_t pwm_timers[STEPPER_COUNT];
 uint8_t steppers_active = 0;
-gpio_num_t stepper_pins[STEPPER_COUNT]  = { STEPPER_0_PIN,   STEPPER_1_PIN,   STEPPER_2_PIN,   STEPPER_3_PIN };
-uint8_t stepper_notes_playing[STEPPER_COUNT] = { STEPPER_NO_NOTE_PLAYING };
+
+gpio_num_t     pins[STEPPER_COUNT]     = { STEPPER_0_PIN,   STEPPER_1_PIN,  STEPPER_2_PIN,  STEPPER_3_PIN };
+ledc_channel_t channels[STEPPER_COUNT] = { LEDC_CHANNEL_0,  LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3 };
+ledc_timer_t   timers[STEPPER_COUNT]   = { LEDC_TIMER_0,    LEDC_TIMER_1,   LEDC_TIMER_2,   LEDC_TIMER_3 };
+
 TickType_t stepper_last_played[STEPPER_COUNT] = { 0 };
+uint8_t notes_playing[STEPPER_COUNT] = { STEPPER_NO_NOTE_PLAYING };
 
-// Queues
-#define NOTE_QUEUE_SIZE STEPPER_COUNT
-QueueHandle_t NoteQueue;
+// this should probably not be a global var 
+// but idk what freertos construct to use
+static midi_midi_event current_event;
 
-// Callback to generate PWM signal
-static void timer_callback(void * arg)
-{
-  static uint8_t state = LOW;
-  if (state == LOW) {
-    REG_WRITE(GPIO_OUT_W1TS_REG, 1 << (*(gpio_num_t*) arg));
-  } else {
-    REG_WRITE(GPIO_OUT_W1TC_REG, 1 << (*(gpio_num_t*) arg));
-  }
-  state = !state;
-}
-
+/* @function Stepper_NoteOff
+ * @param note - Note number (0-127) to turn off
+ * @brief Stops a note by finding a stepper playing that note and pausing its timer */
 void Stepper_NoteOff(uint8_t note)
 {
-  // Find a stepper that's playing this note and stop its PWM
   for (int i = 0; i < STEPPER_COUNT; i++) {
-    if (stepper_notes_playing[i] == note) {
-      // printf("Stopping Stepper%d\n", i);
-      esp_timer_stop(pwm_timers[i]);
-      gpio_set_level(stepper_pins[i], LOW);
-      stepper_notes_playing[i] = STEPPER_NO_NOTE_PLAYING;
+    if (notes_playing[i] == note) {
+      ESP_ERROR_CHECK(ledc_timer_pause(LEDC_MODE, timers[i]));
+      notes_playing[i] = STEPPER_NO_NOTE_PLAYING;
+      stepper_last_played[i] = 0;
       steppers_active--;
       return;
     }
   }
 }
 
-// Responsible for adjusting timer (note) frequency
+/* @function AssignStepper
+ * @brief Pick a stepper that the next note should be assigned to
+ * @return Index of chosen stepper */
+uint8_t AssignStepper(void)
+{
+  if (steppers_active == STEPPER_COUNT) {
+    // If all are active - pick the LRU stepper
+    uint32_t min = stepper_last_played[0];
+    uint8_t min_idx = 0;
+    for (int i = 0; i < STEPPER_COUNT; i++) {
+      if (stepper_last_played[i] != 0 && stepper_last_played[i] < min) {
+        min = stepper_last_played[i];
+        min_idx = i;
+      }
+    }
+    Stepper_NoteOff(notes_playing[min_idx]);
+    return min_idx;
+  } else {
+    for (int i = 0; i < STEPPER_COUNT; i++) {
+      if (notes_playing[i] == STEPPER_NO_NOTE_PLAYING) return i;
+    }
+  }
+  return 0;
+}
+
+/* @function Stepper_Task
+ * @brief Given a note (for now: in global var midi_midi_event current_event),
+ *        determine which stepper should play the note, and update the stepper 
+ *        frequency accordingly. */
 TaskHandle_t Stepper_TaskHandle = NULL;
 void Stepper_Task(void * arg)
 {
-  midi_midi_event e;
-
   while (1) {
-    // still unsure if this is the right function to call
     ulTaskNotifyTake(0, portMAX_DELAY);
-
-    if (uxQueueMessagesWaiting(NoteQueue) > 0) {
-      xQueueReceive(NoteQueue, &e, 5);
-      if (e.status != MIDI_STATUS_NOTE_ON) continue;
-
-      // Pick a stepper to send to
-      uint8_t stepper_num = 0;
-      if (steppers_active == STEPPER_COUNT) {
-        Stepper_NoteOff(stepper_notes_playing[0]);
-      }
-
-      esp_timer_start_periodic(pwm_timers[stepper_num], period[e.param1] / 10);
-      steppers_active++;
-      stepper_notes_playing[stepper_num] = e.param1;
-      stepper_last_played[stepper_num] = xTaskGetTickCount();
-    }
+    if (current_event.status != MIDI_STATUS_NOTE_ON) continue;
+    uint8_t num = AssignStepper();
+    ESP_ERROR_CHECK(ledc_set_freq(LEDC_MODE, timers[num], (int) frequency[current_event.param1]));
+    ESP_ERROR_CHECK(ledc_timer_resume(LEDC_MODE, timers[num]));
+    steppers_active++;
+    notes_playing[num] = current_event.param1;
+    stepper_last_played[num] = xTaskGetTickCount();
   }
 }
 
+/* @function MidiController_Task
+ * @brief Run the midi parser. */
 TaskHandle_t MidiController_TaskHandle = NULL;
 void MidiController_Task(void * arg)
 {
-  // Initialize Midi parser
+  // Initialize
   struct midi_parser * parser = malloc(sizeof(struct midi_parser));
   parser->state = MIDI_PARSER_INIT;
   parser->size  = MIDI_LEN;
@@ -117,35 +133,15 @@ void MidiController_Task(void * arg)
 
   // Midi controller variables
   uint8_t first_note_event = true;
-  double mticks_per_ms = 0.25;
-  int mticks_til_next_event = 0;
+  uint16_t mticks_per_task_tick = 20; // default: 120 bpm 4/4
+  uint16_t mticks_til_next_event = 0;
   midi_midi_event stored_event;
+  uint32_t us_per_qtr = 0; // from set_tempo meta event
 
   while (1)
   {
     status = midi_parse(parser);
     switch (status) {
-      case MIDI_PARSER_EOB:
-        ESP_LOGI(TAG, "Midi parsed");
-        break;
-
-      case MIDI_PARSER_ERROR:
-        ESP_LOGE(TAG, "Midi parser error");
-        return;
-
-      case MIDI_PARSER_HEADER:
-        mticks_per_ms = 1000.0 / parser->header.time_division;
-        break;
-
-      case MIDI_PARSER_TRACK_META:
-        // TODO
-        if (parser->meta.type == MIDI_META_SET_TEMPO) {
-          // Update mticks per thingy
-          // mticks_per_ms = (parser->meta.bytes / 1000) / parser->header.time_division;
-          // printf("new mticks per ms: %d\n", mticks_per_ms);
-        }
-        break;
-
       case MIDI_PARSER_TRACK_MIDI:
         // Initialize the stored event if needed
         if (first_note_event) {
@@ -157,10 +153,9 @@ void MidiController_Task(void * arg)
         // Handle the stored event
         // Only NOTE_ON handled for now.
         if (stored_event.status == MIDI_STATUS_NOTE_ON) {
-          xQueueSend(NoteQueue, &stored_event, 5);
+          current_event = stored_event;
           xTaskNotifyGive(Stepper_TaskHandle);
         } else if (stored_event.status == MIDI_STATUS_NOTE_OFF) {
-          printf("Note off: %d\n", stored_event.param1);
           Stepper_NoteOff(stored_event.param1);
         }
 
@@ -171,39 +166,55 @@ void MidiController_Task(void * arg)
         stored_event = parser->midi;
         break;
 
+      case MIDI_PARSER_TRACK_META:
+        if (parser->meta.type == MIDI_META_SET_TEMPO) {
+          // Read next 3 bytes for tempo (usec per qtr note)
+          us_per_qtr = 0;
+          for (int i = 0; i < TEMPO_BYTE_LENGTH; i++) {
+            us_per_qtr <<= 8;
+            us_per_qtr += parser->meta.bytes[i];
+          }
+          if (us_per_qtr == 0) break;
+          mticks_per_task_tick = (parser->header.time_division * (1000000/configTICK_RATE_HZ)) / us_per_qtr;
+        }
+        break;
+
       default: break;
     }
 
-    // Run when next event happens
-    vTaskDelay((double) mticks_til_next_event * mticks_per_ms);
+    // Only run task when next event is supposed to happen
+    int delay_ticks = mticks_til_next_event / mticks_per_task_tick;
+    vTaskDelay(delay_ticks);
   }
 }
 
 void app_main()
 {
-  // GPIO init
-  gpio_config_t io_conf = {};
-  io_conf.intr_type = GPIO_INTR_DISABLE;
-  io_conf.mode = GPIO_MODE_OUTPUT;
-  io_conf.pin_bit_mask = GPIO_OUT_PINS;
-  io_conf.pull_down_en = 0;
-  io_conf.pull_up_en = 0;
-  gpio_config(&io_conf);
-
-  // Queue for steppers to read notes from
-  NoteQueue = xQueueCreate(NOTE_QUEUE_SIZE, sizeof(midi_midi_event * ));
-
-  // Set up timers controlling PWM for each stepper
   for (int i = 0; i < STEPPER_COUNT; i++) {
-    esp_timer_create_args_t periodic_timer_args = {
-      .callback = &timer_callback,
-      .arg = (void *) &stepper_pins[i],
+    // Prepare and then apply the LEDC PWM timer configuration
+    ledc_timer_config_t ledc_timer = {
+      .speed_mode       = LEDC_MODE,
+      .timer_num        = timers[i],
+      .duty_resolution  = LEDC_DUTY_RES,
+      .freq_hz          = 1000,
+      .clk_cfg          = LEDC_AUTO_CLK
     };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &pwm_timers[i]));
+    // Prepare and then apply the LEDC PWM channel configuration
+    ledc_channel_config_t ledc_channel = {
+      .speed_mode = LEDC_MODE,
+      .channel    = channels[i],
+      .timer_sel  = timers[i],
+      .intr_type  = LEDC_INTR_DISABLE,
+      .gpio_num   = pins[i],
+      .duty       = 3,
+      .hpoint     = 0,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+    ESP_ERROR_CHECK(ledc_timer_pause(LEDC_MODE, timers[i]));
   }
 
-  xTaskCreate(Stepper_Task, "StepperTask", 2048, NULL, 10, &Stepper_TaskHandle);
+  xTaskCreate(Stepper_Task, "StepperTask", 4096, NULL, 10, &Stepper_TaskHandle);
   xTaskCreate(MidiController_Task, "MidiController_Task", 4096, NULL, 10, &MidiController_TaskHandle);
 }
-
