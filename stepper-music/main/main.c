@@ -2,6 +2,7 @@
 /* █▀ ▀█▀ █▀▀ █▀█ █▀█ █▀▀ █▀█    █▀▄▀█ █▀█ ▀█▀ █▀█ █▀█    █▀▄▀█ █░█ █▀ █ █▀▀ */
 /* ▄█ ░█░ ██▄ █▀▀ █▀▀ ██▄ █▀▄    █░▀░█ █▄█ ░█░ █▄█ █▀▄    █░▀░█ █▄█ ▄█ █ █▄▄ */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -17,12 +18,9 @@
 #include "frequency.h"
 
 /***** Specify Midi file and length here ******/
-// #include "midi/god_multi.h"
-// #define MIDI_LEN (playing_god_multi_mid_len)
-// #define MIDI_ARR (playing_god_multi_mid)
-#include "midi/midi_god.h"
-#define MIDI_LEN (god_mid_len)
-#define MIDI_ARR (god_mid)
+#include "midi/god_multi.h"
+#define MIDI_LEN (playing_god_multi_mid_len)
+#define MIDI_ARR (playing_god_multi_mid)
 /**********************************************/
 
 #define LOW  0
@@ -31,6 +29,9 @@
 
 #define TEMPO_BYTE_LENGTH 3
 #define STEPPER_NO_NOTE_PLAYING 128 // valid midi note range is 0-127
+
+// YOU FUCKING PIECE OF SHIT
+#define LEDC_ENABLE
 
 // Pin definitions
 #define DEBUG_LED GPIO_NUM_2 
@@ -42,15 +43,13 @@
                        (1ULL << STEPPER_2_PIN) | (1ULL << STEPPER_3_PIN) | (1ULL << DEBUG_LED))
 
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
-#define LEDC_DUTY_RES   LEDC_TIMER_3_BIT // only 50% duty available
+#define LEDC_DUTY_RES   LEDC_TIMER_4_BIT
 
-// Stepper array variables
-TaskHandle_t StepperTaskHandle;
-uint8_t steppers_active = 0;
-
+// Stepper variables
 gpio_num_t     pins[STEPPER_COUNT]     = { STEPPER_0_PIN,   STEPPER_1_PIN,  STEPPER_2_PIN,  STEPPER_3_PIN };
 ledc_channel_t channels[STEPPER_COUNT] = { LEDC_CHANNEL_0,  LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3 };
 ledc_timer_t   timers[STEPPER_COUNT]   = { LEDC_TIMER_0,    LEDC_TIMER_1,   LEDC_TIMER_2,   LEDC_TIMER_3 };
+uint8_t steppers_active = 0;
 
 TickType_t stepper_last_played[STEPPER_COUNT] = { 0 };
 uint8_t notes_playing[STEPPER_COUNT] = { STEPPER_NO_NOTE_PLAYING };
@@ -66,7 +65,9 @@ void Stepper_NoteOff(uint8_t note)
 {
   for (int i = 0; i < STEPPER_COUNT; i++) {
     if (notes_playing[i] == note) {
+      #ifdef LEDC_ENABLE
       ESP_ERROR_CHECK(ledc_timer_pause(LEDC_MODE, timers[i]));
+      #endif
       notes_playing[i] = STEPPER_NO_NOTE_PLAYING;
       stepper_last_played[i] = 0;
       steppers_active--;
@@ -76,6 +77,7 @@ void Stepper_NoteOff(uint8_t note)
 }
 
 /* @function AssignStepper
+ *
  * @brief Pick a stepper that the next note should be assigned to
  * @return Index of chosen stepper */
 uint8_t AssignStepper(void)
@@ -97,6 +99,7 @@ uint8_t AssignStepper(void)
       if (notes_playing[i] == STEPPER_NO_NOTE_PLAYING) return i;
     }
   }
+  printf("ERROR ASSIGN STEPPER\n");
   return 0;
 }
 
@@ -111,9 +114,12 @@ void Stepper_Task(void * arg)
     ulTaskNotifyTake(0, portMAX_DELAY);
     if (current_event.status != MIDI_STATUS_NOTE_ON) continue;
     uint8_t num = AssignStepper();
+    #ifdef LEDC_ENABLE
     ESP_ERROR_CHECK(ledc_set_freq(LEDC_MODE, timers[num], (int) frequency[current_event.param1]));
     ESP_ERROR_CHECK(ledc_timer_resume(LEDC_MODE, timers[num]));
+    #endif
     steppers_active++;
+    printf("Set %d to %d (Active: %d)\n", num, current_event.param1, steppers_active);
     notes_playing[num] = current_event.param1;
     stepper_last_played[num] = xTaskGetTickCount();
   }
@@ -182,14 +188,20 @@ void MidiController_Task(void * arg)
       default: break;
     }
 
+    // printf("NOTES PLAYING\n");
+    // for (int i = 0; i < STEPPER_COUNT; i++) {
+    //   printf("%d: %d\n", i, notes_playing[i]);
+    // }
+
     // Only run task when next event is supposed to happen
-    int delay_ticks = mticks_til_next_event / mticks_per_task_tick;
+    int delay_ticks = (mticks_til_next_event / mticks_per_task_tick) + 1;
     vTaskDelay(delay_ticks);
   }
 }
 
 void app_main()
 {
+  #ifdef LEDC_ENABLE
   for (int i = 0; i < STEPPER_COUNT; i++) {
     // Prepare and then apply the LEDC PWM timer configuration
     ledc_timer_config_t ledc_timer = {
@@ -208,13 +220,19 @@ void app_main()
       .timer_sel  = timers[i],
       .intr_type  = LEDC_INTR_DISABLE,
       .gpio_num   = pins[i],
-      .duty       = 3,
+      .duty       = 7,
       .hpoint     = 0,
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
     ESP_ERROR_CHECK(ledc_timer_pause(LEDC_MODE, timers[i]));
   }
+  #endif
+
+  for (int i = 0; i < STEPPER_COUNT; i++) {
+    notes_playing[i] = STEPPER_NO_NOTE_PLAYING;
+  }
 
   xTaskCreate(Stepper_Task, "StepperTask", 4096, NULL, 10, &Stepper_TaskHandle);
   xTaskCreate(MidiController_Task, "MidiController_Task", 4096, NULL, 10, &MidiController_TaskHandle);
 }
+
