@@ -39,15 +39,12 @@
 static const char * TAG = "Step";
 
 // Stepper array variables
-static const char* stepper_task_names[] = { "S0_Task", "S1_Task", "S2_Task", "S3_Task", };
-TaskHandle_t stepper_task_handles[] = { NULL };
-uint8_t stepper_numbers[] = { 0, 1, 2, 3 };
+TaskHandle_t StepperTaskHandle;
+esp_timer_handle_t pwm_timers[STEPPER_COUNT];
+uint8_t steppers_active = 0;
 gpio_num_t stepper_pins[STEPPER_COUNT]  = { STEPPER_0_PIN,   STEPPER_1_PIN,   STEPPER_2_PIN,   STEPPER_3_PIN };
 uint8_t stepper_notes_playing[STEPPER_COUNT] = { STEPPER_NO_NOTE_PLAYING };
-esp_timer_handle_t pwm_timers[STEPPER_COUNT];
 TickType_t stepper_last_played[STEPPER_COUNT] = { 0 };
-
-uint8_t steppers_active = 0;
 
 // Queues
 #define NOTE_QUEUE_SIZE STEPPER_COUNT
@@ -57,12 +54,11 @@ QueueHandle_t NoteQueue;
 static void timer_callback(void * arg)
 {
   static uint8_t state = LOW;
-  gpio_set_level(*((gpio_num_t*) arg), state);
-  // if (state == LOW) {
-  //   REG_WRITE(GPIO_OUT_W1TS_REG, 1 << (*(gpio_num_t*) arg));
-  // } else {
-  //   REG_WRITE(GPIO_OUT_W1TC_REG, 1 << (*(gpio_num_t*) arg));
-  // }
+  if (state == LOW) {
+    REG_WRITE(GPIO_OUT_W1TS_REG, 1 << (*(gpio_num_t*) arg));
+  } else {
+    REG_WRITE(GPIO_OUT_W1TC_REG, 1 << (*(gpio_num_t*) arg));
+  }
   state = !state;
 }
 
@@ -86,13 +82,21 @@ TaskHandle_t Stepper_TaskHandle = NULL;
 void Stepper_Task(void * arg)
 {
   midi_midi_event e;
-  uint8_t stepper_num = *((uint8_t*) arg);
 
   while (1) {
-    vTaskDelay(10);
+    // still unsure if this is the right function to call
+    ulTaskNotifyTake(0, portMAX_DELAY);
+
     if (uxQueueMessagesWaiting(NoteQueue) > 0) {
       xQueueReceive(NoteQueue, &e, 5);
       if (e.status != MIDI_STATUS_NOTE_ON) continue;
+
+      // Pick a stepper to send to
+      uint8_t stepper_num = 0;
+      if (steppers_active == STEPPER_COUNT) {
+        Stepper_NoteOff(stepper_notes_playing[0]);
+      }
+
       esp_timer_start_periodic(pwm_timers[stepper_num], period[e.param1] / 10);
       steppers_active++;
       stepper_notes_playing[stepper_num] = e.param1;
@@ -111,9 +115,9 @@ void MidiController_Task(void * arg)
   parser->in    = MIDI_ARR;
   enum midi_parser_status status;
 
-  // Blargh
+  // Midi controller variables
   uint8_t first_note_event = true;
-  double mticks_per_ms = 1;
+  double mticks_per_ms = 0.25;
   int mticks_til_next_event = 0;
   midi_midi_event stored_event;
 
@@ -130,10 +134,7 @@ void MidiController_Task(void * arg)
         return;
 
       case MIDI_PARSER_HEADER:
-        // Determine ms per mtick. (tempo hardcoded to 120bpm for now)
-        // 1000000 == 120bpm (tempo), then divide by 10^3 to get ms
-        // mticks_per_ms = 1000 / parser->header.time_division;
-        // printf("mticks per ms: %d\n", mticks_per_ms);
+        mticks_per_ms = 1000.0 / parser->header.time_division;
         break;
 
       case MIDI_PARSER_TRACK_META:
@@ -156,11 +157,8 @@ void MidiController_Task(void * arg)
         // Handle the stored event
         // Only NOTE_ON handled for now.
         if (stored_event.status == MIDI_STATUS_NOTE_ON) {
-          if (steppers_active == STEPPER_COUNT) {
-            Stepper_NoteOff(stepper_notes_playing[0]);
-            gpio_set_level(DEBUG_LED, HIGH);
-          }
           xQueueSend(NoteQueue, &stored_event, 5);
+          xTaskNotifyGive(Stepper_TaskHandle);
         } else if (stored_event.status == MIDI_STATUS_NOTE_OFF) {
           printf("Note off: %d\n", stored_event.param1);
           Stepper_NoteOff(stored_event.param1);
@@ -203,9 +201,9 @@ void app_main()
     };
 
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &pwm_timers[i]));
-    xTaskCreate(Stepper_Task, stepper_task_names[i], 2048, (void *) &stepper_numbers[i], 10, &stepper_task_handles[i]);
   }
 
-  xTaskCreate(MidiController_Task, "MidiController_Task", 8092, NULL, 10, &MidiController_TaskHandle);
+  xTaskCreate(Stepper_Task, "StepperTask", 2048, NULL, 10, &Stepper_TaskHandle);
+  xTaskCreate(MidiController_Task, "MidiController_Task", 4096, NULL, 10, &MidiController_TaskHandle);
 }
 
