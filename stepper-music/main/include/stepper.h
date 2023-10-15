@@ -8,7 +8,7 @@
 #include <inttypes.h>
 #include "midi.h"
 
-#define STEPPER_COUNT 4
+#define STEPPER_COUNT 1
 #define STEPPER_0_PIN GPIO_NUM_23
 #define STEPPER_1_PIN GPIO_NUM_1
 #define STEPPER_2_PIN GPIO_NUM_21

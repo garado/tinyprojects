@@ -26,19 +26,10 @@
 #define LOW  0
 #define HIGH 1
 #define TEMPO_BYTE_LENGTH 3
-#define DEBUG_LED GPIO_NUM_2 
+#define DEBUG_LED GPIO_NUM_2
 
 TaskHandle_t MidiController_TaskHandle = NULL;
 gptimer_handle_t parser_timer = NULL;
-
-static bool IRAM_ATTR parser_timer_callback(gptimer_handle_t timer,
-                                            const gptimer_alarm_event_data_t *edata,
-                                            void *user_data)
-{
-  BaseType_t high_task_awoken = pdFALSE;
-  vTaskNotifyGiveFromISR(MidiController_TaskHandle, &high_task_awoken);
-  return (high_task_awoken == pdTRUE);
-}
 
 /* @function MidiController_Task
  * @brief Run the midi parser. */
@@ -94,7 +85,6 @@ void MidiController_Task(void * arg)
             us_per_qtr += parser->meta.bytes[i];
           }
           if (us_per_qtr == 0) break;
-          usec_per_mtick = us_per_qtr / parser->header.time_division;
           mticks_per_task_tick = (parser->header.time_division * (1000000/configTICK_RATE_HZ)) / us_per_qtr;
         }
         break;
